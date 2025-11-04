@@ -14,6 +14,8 @@ Dicho buffer se encuentra en la dirección física de memoria `0xF151C000` y sol
 
  La interrupción de buffer completo será la encargada de dar el acceso correspondiente a las tareas que lo hayan solicitado y actualizar las copia del buffer "vivas". Es deseable que cada tarea que accede por copia mantenga una única copia del buffer para no ocupar la memoria innecesariamente.
 
+![Flujo del sistema](./img/esquema_cartucho.png)
+
 ## Ejercicio 1:
 - a) Programar la rutina que atenderá la interrupción que el lector de cartuchos generará al terminar de llenar el buffer.
 	- Consejo: programar una función deviceready y llamarla desde esta rutina.
