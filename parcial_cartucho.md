@@ -28,3 +28,27 @@ Como las direcciones que utilizamos viven por fuera de los 817MB definidos en lo
 ## Ejercicio 2:
 - a) Programar la función void buffer_dma(pd_entry_t* pd)
 - b) Programar la función void buffer_copy(pd_entry_t* pd, paddr_t phys, vaddr_t virt)
+
+## EXTRA
+Nuestro kernel "Orga Génesis" es funcional, pero ineficiente. Hemos detectado que algunas tareas de Nivel 3
+solicitan acceso al dispositivo (opendevice) pero luego nunca leen los datos.
+Esto es un desperdicio crítico de recursos. En particular:
+● En Modo Copia, se gastan 4KB de RAM valiosa para una copia que no se usa.
+● El deviceready (IRQ 40) gasta ciclos de CPU actualizando copias.
+Para solucionar esto, implementaremos una nueva tarea de nivel 0 llamada task_killer. El codigo de esta tarea
+reside en el area de kernel, se ejecutará como las demas tareas en round robin y debera deshabilitar cualquier
+tarea de nivel 3 que haya desperdiciado recursos por mucho tiempo.
+Una tarea se considera ociosa y debe ser deshabilitada si cumple todas las siguientes condiciones:
+1. Ha estado en estado TASK_RUNNABLE por más de 100 "ticks" de reloj.
+2. Tiene un acceso activo al dispositivo (es decir, task[i].mode != NO_ACCESS y task[i].status !=
+TASK_BLOCKED).
+3. No ha leído la memoria del buffer (DMA o Copia) desde la última vez que el "killer" la inspeccionó.
+
+## Ejercicio 3
+
+Describa todos los pasos para crear e inicializar la nueva tarea task_killer:
+Detalle los cambios necesarios en:
+1. GDT: ¿Cómo se crea la nueva entrada de TSS (Task State Segment) en la GDT?
+2. TSS: ¿Qué campos críticos de la struct tss (TSS) de esta nueva tarea debe
+inicializar? (Mencione al menos EIP, CS, DS, ESP0, SS0 y CR3).
+3. Scheduler: ¿Cómo se agrega esta nueva tarea Nivel 0 al array sched_tasks?
