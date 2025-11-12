@@ -62,7 +62,8 @@ Stack: para parámetros adicionales si son necesarios
 
 En el ISR de assembly, hacemos pushad para preservar todos los registros, luego pusheamos los parámetros específicos a la pila en orden inverso (porque el stack crece hacia abajo), llamamos a la función C, y finalmente limpiamos la pila con add esp, N.
 Por ejemplo, para espia(selector, virt_leer, virt_escribir):
-asmpushad                 ; Guardar todos los registros
+```asm
+pushad                 ; Guardar todos los registros
 push esi              ; 3er parámetro (virt_escribir)
 push edi              ; 2do parámetro (virt_leer)
 push eax              ; 1er parámetro (selector)
@@ -71,6 +72,7 @@ add esp, 12           ; Limpiar pila (3 params × 4 bytes)
 mov [esp+28], eax     ; Guardar retorno en EAX de pushad
 popad                 ; Restaurar registros
 iret                  ; Volver a usuario
+```
 Por Qué IDT_ENTRY3 vs IDT_ENTRY0
 Las syscalls siempre usan IDT_ENTRY3 porque deben ser invocables desde nivel 3 (usuario). El "3" en IDT_ENTRY3 indica el DPL (Descriptor Privilege Level) del interrupt gate. Un gate con DPL=3 puede invocarse desde cualquier nivel (0, 1, 2, 3). Un gate con DPL=0 solo puede invocarse desde nivel 0.
 Si pusiéramos una syscall con IDT_ENTRY0, cuando una tarea de usuario hiciera INT 0x90, el procesador lanzaría una excepción #GP (General Protection Fault) porque estaría violando los niveles de privilegio. No es que "no funcione", es que el procesador activamente lo previene por seguridad.
@@ -180,13 +182,16 @@ Una vez reservada, la página NO se devuelve automáticamente. El sistema debe l
 zero_page
 Inicializa una página física a ceros. Recibe una dirección virtual (no física directamente). Esto es porque el procesador no puede acceder a direcciones físicas directamente; necesita que estén mapeadas en el espacio virtual.
 Típicamente hace:
-cvoid zero_page(vaddr_t virt) {
+```c
+void zero_page(vaddr_t virt) {
     memset((void*)virt, 0, 4096);
 }
+```
 Es crucial para seguridad: cuando asignamos memoria nueva a una tarea, debe estar en cero para que no lea datos de otra tarea que usó esa página antes.
 copy_page
 Copia contenido de una página física a otra. Similar a zero_page, trabaja con direcciones virtuales. Típicamente mapea temporalmente ambas páginas físicas en direcciones virtuales conocidas del kernel, hace un memcpy, y luego las desmapea.
-cvoid copy_page(paddr_t dst, paddr_t src) {
+```c
+void copy_page(paddr_t dst, paddr_t src) {
     // Mapear temporalmente
     mmu_map_page(kernel_cr3, TEMP_VIRT_DST, dst, MMU_P | MMU_W);
     mmu_map_page(kernel_cr3, TEMP_VIRT_SRC, src, MMU_P);
@@ -198,7 +203,7 @@ cvoid copy_page(paddr_t dst, paddr_t src) {
     mmu_unmap_page(kernel_cr3, TEMP_VIRT_DST);
     mmu_unmap_page(kernel_cr3, TEMP_VIRT_SRC);
 }
-
+```
 ## SCHEDULER
 Qué Es y Por Qué Existe
 El scheduler es el componente del kernel que decide qué tarea ejecutar en cada momento. Sin scheduler, solo podríamos correr una tarea a la vez hasta que termine. Con scheduler, podemos tener multitasking: múltiples tareas "corriendo simultáneamente" (en realidad, turnándose muy rápido).
@@ -219,7 +224,8 @@ TASK_KILLED: Terminada o desalojada permanentemente. Nunca vuelve a ejecutarse.
 El scheduler solo elige tareas en estado RUNNABLE. Cuando un evento ocurre (por ejemplo, un lock se libera), el código correspondiente cambia el estado de las tareas esperando de BLOCKED a RUNNABLE.
 Round-Robin Básico
 Es el algoritmo de scheduling más simple. Mantiene una lista de tareas RUNNABLE y las ejecuta en orden circular. Cada tarea corre por un quantum (período fijo de tiempo, determinado por el timer). Cuando expira el quantum, se pasa a la siguiente tarea.
-cuint16_t sched_next_task(void) {
+```c
+uint16_t sched_next_task(void) {
     // Buscar siguiente tarea RUNNABLE
     for (int i = current_task + 1; i != current_task; i = (i+1) % MAX_TASKS) {
         if (sched_tasks[i].state == TASK_RUNNABLE) {
@@ -230,6 +236,7 @@ cuint16_t sched_next_task(void) {
     // Si no hay ninguna, devolver idle
     return IDLE_SELECTOR;
 }
+```
 Es justo (todas las tareas reciben el mismo tiempo) pero no considera prioridades.
 Scheduler con Prioridades
 Un refinamiento es distinguir tareas prioritarias de normales. El algoritmo típico:
