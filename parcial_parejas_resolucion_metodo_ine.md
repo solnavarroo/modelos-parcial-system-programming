@@ -203,24 +203,20 @@ uint32_t uso_de_memoria_de_las_parejas(){
 }
 
 bool estaMapeada(vaddr_t virt, task_id tarea){
-    uint32_t cr3 = mmu_get_cr3_from_selector(sched_tasks[task_id].selector);
-
+    uint32_t cr3 = mmu_get_cr3_from_selector(sched_tasks[tarea].selector);
+    
+    pd_entry_t* pd = (pd_entry_t*)CR3_TO_PAGE_DIR(cr3);
     uint32_t pd_index = VIRT_PAGE_DIR(virt);
     uint32_t pt_index = VIRT_PAGE_TABLE(virt);
-
-    pd_entry_t* pd = (pd_entry_t*)CR3_TO_PAGE_DIR(cr3);
-    if (!pd) return false;
-
-    pd_entry_t pde = pd[pd_index];
-    if (!(pde.present)) return false;
-
+    
+    if (!(pd[pd_index].attrs & MMU_P)) 
+        return false;
+    
     pt_entry_t* pt = (pt_entry_t*)(pd[pd_index].pt << 12);
-    if (!pt) return false;
-
-    pte_t* pte = &pt[pt_index];
-    if(pte.present) return true;
-    return false;
+    
+    return (pt[pt_index].attrs & MMU_P);
 }
 
 ```
+
 
