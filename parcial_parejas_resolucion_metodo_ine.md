@@ -192,7 +192,7 @@ uint32_t uso_de_memoria_de_las_parejas(){
         task_id participante = parejas[i]->participante;
         if(!fue_contado[lider]){
             for(vaddr_t virt = 0xC0C00000; virt < 0xC0C00000 + 4MB; virt += PAGE_SIZE){
-                if(estaMapeada(virt, lider)){
+                if(estaMapeada(virt, lider) || estaMapeada(virt, participante)){
                     cantidad +=1;
                 }
             }
@@ -223,3 +223,4 @@ bool estaMapeada(vaddr_t virt, task_id tarea){
 }
 
 ```
+
