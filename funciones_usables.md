@@ -14,6 +14,10 @@ uint32_t mmu_get_cr3_from_selector(int16_t selector){
     return tss->cr3;
 }
 ```
+**Conseguir CR3 desde el indice**
+```C
+uint32_t cr3 = tss_tasks[i].cr3;
+```
 **Conseguir PTE desde el selector y virt**
 ```C
 pt_entry_t* mmu_get_pte_for_task(uint16_t selector, vaddr_t virt){
@@ -61,6 +65,35 @@ uint32_t obtenerDireccionFisica(uint32_t cr3,uint32_t* virt){
     return direccion_fisica // OJO esto devuelve la BASE de la página a la que apuntaba la dirección física (sin el offset)
 }
 ```
+**EstaMapeada**
+```C
+bool esta_mapeada(cr3, virt) {
+    pd = CR3_TO_PAGE_DIR(cr3);
+    if (!(pd[pd_idx].present)) return false;
+    
+    pt = pd[pd_idx].pt << 12;
+    if (!(pt[pt_idx].present)) return false;
+    
+    return true;
+}
+
+bool estaMapeada(vaddr_t virt, task_id tarea){
+    uint32_t cr3 = mmu_get_cr3_from_selector(sched_tasks[tarea].selector);
+    
+    pd_entry_t* pd = (pd_entry_t*)CR3_TO_PAGE_DIR(cr3);
+    uint32_t pd_index = VIRT_PAGE_DIR(virt);
+    uint32_t pt_index = VIRT_PAGE_TABLE(virt);
+    
+    if (!(pd[pd_index].attrs & MMU_P)) 
+        return false;
+    
+    pt_entry_t* pt = (pt_entry_t*)(pd[pd_index].pt << 12);
+    
+    return (pt[pt_index].attrs & MMU_P);
+}
+```
+
+
 **Cambiar tarea**
 ```asm
 cambiarTarea:
