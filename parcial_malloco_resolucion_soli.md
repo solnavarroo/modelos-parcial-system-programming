@@ -2,11 +2,11 @@
 
 **Estructuras nuevas y Modificaciones:**
 
-Como dice la consigna tenemos un array de reservas_por_memoria alojado estaticamente en la memoria de el kernel. Entonces defino:
-
-```C
+Necesitamos una estructura que mantenga registro de qué memoria ha reservado cada tarea. Esta estructura DEBE vivir en memoria del kernel, no en memoria de usuario, por varias razones fundamentales. Primero, debe ser accesible desde cualquier contexto del kernel (syscalls, page fault handler, garbage collector) independientemente de qué tarea esté ejecutando. Segundo, debe persistir más allá de la vida de cualquier tarea individual (por ejemplo, cuando una tarea muere, el garbage collector necesita acceder a sus reservas para limpiar). Tercero, si estuviera en memoria de usuario, cada tarea tendría su propia copia y no podríamos coordinar la asignación de memoria globalmente.
+```c
 static reservas_por_tarea_t reservas[MAX_TAREAS];
 ```
+El array es estático, lo que significa que se aloja en el segmento de datos del kernel y está siempre en memoria. Cada elemento del array corresponde a UNA tarea y contiene TODAS sus reservas. Por ejemplo, reservas[5] contiene todas las reservas de la tarea con task_id 5.
 
 Luego, agrego un nuevo estado de tarea, TASK_BLOCKED, para las tareas que no tiene que volver a correr.
 
@@ -19,27 +19,34 @@ typedef enum {
 } task_state_t;
 ```
 
+¿Por qué TASK_BLOCKED?
+Cuando una tarea accede a memoria inválida (fuera de sus reservas), el page fault handler la marca como BLOCKED y la desaloja.
+El scheduler NUNCA elegirá una tarea BLOCKED. El scheduler verifica este estado antes de elegir una tarea. Solo las tareas RUNNABLE son candidatas para ejecución. Esto asegura que tareas problemáticas no vuelvan a correr y causen más problemas.
+Es diferente de PAUSED porque PAUSED es temporal/reversible, BLOCKED es permanente (la tarea "murió").
+
 ## Ejercicio 1:
 
 **a- Cambios necesarios a realizar sobre el kernel**
 
-Primero, en la inicialización de la IDT, agrego la entrada correspondiente para la interrupción 90 y 91.
-Encambio cuando se habla de la interrupcion 90 y 91, me refiero a malloco (pedir memoria) y a chau (liberar memoria). Entonces como se trata de syscalls, se ejecutará a nivel 3 por eso utilizo IDT_ENTRY3.
+Antes de que la syscall funcione, debemos registrarla en la IDT (Interrupt Descriptor Table). La IDT es una tabla de 256 entradas que mapea cada número de interrupción a su handler. Para syscalls usamos IDT_ENTRY3, donde el "3" indica que el descriptor tiene DPL=3 (Descriptor Privilege Level 3), lo que significa que código de nivel 3 puede invocarlo. Elijo estos numero porque no se solapan con ninguno del TP.
 
 ```C
 void idt_init() {
   // ...
+  // Nivel 3 porque las tareas de USUARIO tienen que poder usarlas
   IDT_ENTRY3(90);
   IDT_ENTRY3(91);
   //...
 }
 ```
 
-
 **Syscall de malloco:**
 
-Esta syscall es la encargada de reservar memoria
-Recibe en el registro EDI el tamanio a pedir.
+Esta syscall es la encargada de reservar memoria. Consiste en:
+
+La instrucción PUSHAD es crucial: guarda los 8 registros de propósito general en un orden específico (EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI), ocupando 32 bytes totales. Esto nos permite restaurarlos después con POPAD. Sin embargo, hay un truco: necesitamos MODIFICAR el EAX guardado para poner el valor de retorno ahí. Por eso calculamos el offset correcto en la pila (+28 bytes desde el ESP actual después de los pushes) y escribimos directamente en esa posición de memoria.
+
+Asumo que recibe en el registro EDI el tamanio a pedir.
 
 ```asm
 extern malloco
@@ -47,7 +54,7 @@ global isr_90
 isr_90:
     pushad
 
-    push ecx ; Le entra el tamanio por pila porque estamos en 32 bits
+    push edi ; Le entra el tamanio por pila porque estamos en 32 bits
     call malloco
     add esp, 4 ; restauramos la pila
 
@@ -75,29 +82,16 @@ isr_91:
     iret
 ```
 
-Cuando una tarea trate de acceder a esa memoria que supuestamente habia reservado, va a saltar un page fault. Por eso lo que hay que hacer es modificar el page fault handler asi recien en ese caso hace el mapeo correspondiente.
+Un Page Fault es una excepción (#14) que el CPU lanza cuando intenta traducir una dirección virtual y encuentra que: la página no está presente (bit Present=0), o los permisos son insuficientes (por ejemplo, intento de escritura en página read-only). El procesador automáticamente guarda la dirección problemática en el registro CR2 y salta al handler.
+En lazy allocation, los Page Faults son ESPERADOS y NORMALES. No son errores, son el mecanismo por el cual se materializa la memoria reservada. El handler debe distinguir entre "page fault esperado" (dirección en rango reservado → mapear y continuar) y "page fault inesperado" (dirección inválida → desalojar tarea).
 
-- Saber qué tarea falló: current_task (o información del CR3 actual).
-
-- Chequear esMemoriaReservada(virt):
-
-    - Si false → acceso inválido → desalojar la tarea: marcarla bloqueada o TASK_BLOCKED y marcar todas sus reservas para liberar. Luego sched_next_task().
-
-    - Si true → localizar la reserva res tal que virt ∈ [res->virt, res->virt + res->tamanio).
-
-- Asignar sólo la página necesaria:
-
-    - Determinar la dirección de base de página: page_base = ALIGN_DOWN(virt, PAGE_SIZE).
-
-    - Obtener una página física libre del área de usuario: paddr = mmu_next_free_user_page().
-
-    - Mapearla en el directorio de la tarea (usar mmu_map_page(r->cr3, page_base, paddr, flags)).
-
-    - Inicializar física a cero: zero_page(paddr).
-
-    - Importante: no cambies res->estado de toda la reserva — ese campo indica el estado de la reserva global (activa, marcada, liberada). Si quieres registrar qué páginas de esa reserva ya están mapeadas, necesitarías una estructura por-reserva que almacene el bitmap de páginas mapeadas. Pero la consigna no lo pide explícitamente: basta con mapear páginas a medida que caen faults.
-
-- Volver y reintentar la instrucción que falló.
+Flujo de Manejo
+El handler recibe la dirección de CR2. Primero verifica si está en el rango reservable (entre 0xA10C0000 y 0xA10C0000 + 4MB). Si no, es acceso inválido. Si sí, busca específicamente QUÉ reserva contiene esa dirección (porque una tarea puede tener múltiples reservas no contiguas en el espacio lógico, aunque sí lo están virtualmente en nuestro diseño).
+Una vez identificada la reserva, pide una página física del pool de usuario (mmu_next_free_user_page). Es crucial ALINEAR la dirección virtual a página antes de mapear, porque el hardware solo trabaja con páginas completas de 4KB. Si virt=0xA10C0678, debemos mapear desde 0xA10C0000. El offset (0x678) se maneja automáticamente por el hardware de paginación.
+Después de mapear, inicializa la página a cero (zero_page). Esto es crítico por seguridad: la página física pudo haber contenido datos de otra tarea. Si no la limpiamos, esta tarea podría leer información confidencial. Además, el enunciado especifica comportamiento tipo calloc (memoria inicializada).
+Finalmente retorna TRUE, lo que indica al procesador que el problema está solucionado y debe reintentar la instrucción que causó el fault. Ahora la página está mapeada, así que la instrucción funcionará.
+Manejo de Accesos Inválidos
+Si la dirección no corresponde a ninguna reserva, el handler debe desalojar la tarea permanentemente. Esto involucra: cambiar su estado a TASK_BLOCKED (para que el scheduler nunca más la elija), marcar TODAS sus reservas como pendientes de liberación (estado=2), y cambiar inmediatamente a otra tarea sin retornar a la problemática.
 
 ```C
 
@@ -127,6 +121,8 @@ bool page_fault_handler(vaddr_t virt) {
 }
 ```
 
+Esta es una rutina auxiliar que fuerza un cambio de tarea inmediato, fuera del flujo normal del scheduler. Se usa cuando necesitamos desalojar la tarea actual sin esperar al próximo tick del timer. Hace un JMP FAR, que es la única forma de cambiar de tarea en x86: el procesador guarda automáticamente el estado completo en la TSS actual y carga el estado completo de la nueva TSS.
+
 ```asm
 cambiarTarea:
     pushad
@@ -143,7 +139,8 @@ cambiarTarea:
 
 ## **Ejercicio 2**
 
-En primer lugar construyo la tss. Explicacion del porque de estos campos:
+Una TSS de tarea kernel es similar a una de usuario pero con diferencias clave en los segmentos y el page directory. Los selectores de código/datos deben ser de nivel 0 (GDT_CODE_0_SEL, GDT_DATA_0_SEL) en lugar de nivel 3. El CR3 debe apuntar a un page directory con mapeos identity del kernel, no mapeos de usuario. Y ESP0 apunta a una pila de kernel reservada específicamente para esta tarea.
+El campo EIP es la dirección donde comienza el código de la tarea. Para el garbage collector, apunta a la función garbage_collector, que contiene un loop infinito. La tarea nunca "termina", simplemente es desalojada periódicamente por el scheduler.
 
 - CR3: Debe apuntar al page directory que usará la tarea. Para una tarea kernel inicializo el cr3 con un page directory con mapeos de kernel (con mmu_init_task_dir_0).
 
@@ -186,6 +183,9 @@ tss_t tss_create_kernel_task(paddr_t code_start) {
   };
 }
 ```
+
+La tarea debe tener una entrada en la GDT (para su TSS) y una entrada en el array del scheduler. El proceso es: buscar un slot libre en la GDT (entradas a partir de GDT_TSS_START), crear la TSS con tss_create_kernel_task, crear el descriptor de GDT apuntando a esa TSS, y agregar la tarea al scheduler.
+
 Creo la nueva entrada de TSS en tasks.c:
 
 ```C
@@ -205,6 +205,8 @@ static int8_t create_task(tipo_e tipo) {
 }
 ```
 
+La función mmu_init_task_dir_0 crea un page directory vacío y luego mapea todo el rango de memoria del kernel de forma identity. Los permisos son MMU_P | MMU_W (presente y writable) pero SIN MMU_U (no user), lo que significa que solo nivel 0 puede acceder. Esto protege el kernel de accesos accidentales o maliciosos desde nivel 3.
+
 Inicializo tarea con mapeos de kernel en mmu.c:
 
 ```C
@@ -220,7 +222,8 @@ paddr_t mmu_init_task_dir_0(void){
 }
 ```
 
-Inicializo ticks e indico como van a avanzar en sched.c:
+Para ejecutar el garbage collector cada 100 ticks, necesitamos un contador global que se incremente en cada interrupción de timer. El scheduler consulta este contador y, cuando es múltiplo de 100, elige al garbage collector en lugar de seguir el round-robin normal.
+Este patrón es común para tareas periódicas del sistema: en lugar de tener un thread separado (que requeriría sincronización compleja), simplemente lo tratamos como una tarea más pero con lógica especial en el scheduler.
 
 ```C
 static uint8_t contador_de_ticks = 0;
@@ -229,8 +232,7 @@ void add_tick(){
     contador_de_ticks++;
 }
 ```
-
-La interrupcion en isr.asm:
+El ISR del timer debe llamar a esta función antes de invocar al scheduler, así el contador está actualizado cuando el scheduler toma decisiones.
 
 ```asm
 extern add_tick_to_task
@@ -249,6 +251,9 @@ _isr32:
 
     iret
 ```
+
+El scheduler ahora tiene dos caminos: si el contador es múltiplo de 100, retorna el selector del garbage collector forzosamente. Si no, procede con el round-robin normal. Esto garantiza que el garbage collector corra periódicamente sin importar qué otras tareas estén activas.
+Es importante que el garbage collector NO incremente current_task cuando es elegido de esta forma especial, porque no es parte del round-robin normal. Es una "interrupción" del flujo normal.
 
 ```C
 uint16_t sched_next_task(void) {
@@ -279,6 +284,9 @@ uint16_t sched_next_task(void) {
 }
 ```
 
+El garbage collector es un loop infinito que recorre todas las tareas del sistema buscando reservas con estado=2 (pendientes de liberación). Para cada una, desmapea todas las páginas del rango y finalmente marca el estado como 3 (liberada, slot reutilizable).
+El proceso de desmapeo es crítico: debe recorrer el rango COMPLETO de la reserva, página por página (incrementos de 4KB), porque lazy allocation pudo haber mapeado solo algunas páginas. Para cada página virtual en el rango, llama a mmu_unmap_page, que: obtiene la página física mapeada, pone Present=0 en la PTE, y retorna la dirección física. En un sistema completo, deberíamos liberar esa página física de vuelta al pool con algo como mmu_free_page(phy), pero el enunciado dice que no nos preocupemos por reciclar.
+Es importante usar el CR3 de la tarea víctima (no el nuestro) al desmapear, porque estamos manipulando SU espacio de direcciones, no el del garbage collector. Obtenemos el CR3 desde su TSS con mmu_get_cr3_from_selector.
 
 ```C
 void garbage_collector(void){
@@ -301,7 +309,9 @@ void garbage_collector(void){
 }
 ```
 
-Funcion auxiliar mmu_get_cr3_from_selector que nos devuelve el cr3
+Esta función es fundamental para trabajar con espacios de direcciones de otras tareas. Dado un selector (que identifica una TSS en la GDT), navega: del selector al índice en la GDT, del índice a la entrada en la GDT, de la entrada a la dirección de la TSS (reconstruyendo la base desde los campos fragmentados del descriptor), y de la TSS al campo CR3.
+
+selector → GDT → TSS → CR3.
 
 ```C
 uint32_t mmu_get_cr3_from_selector(int16_t selector){
@@ -325,7 +335,9 @@ Porque es usando por page_fault_handler y el garbage_collector, sin depender del
 
 b- **Función malloco**
 
-Objetivo: buscar el primer slot libre en array_reservas de la tarea current_task, comprobar que el total reservado + size ≤ 4MB, fijar la dirección virtual de la nueva reserva (empezando en 0xA10C0000 y concatenando reservas anteriores), marcar estado = RESERVA_ACTIVA (1) y devolver el puntero virtual.
+La función malloco es puro código C que corre en nivel 0. Su responsabilidad es RESERVAR un rango de direcciones virtuales, pero NO asignar memoria física. Debe validar varias cosas: que el tamaño no exceda 4MB, que la tarea no haya reservado ya demasiada memoria (suma de todas sus reservas ≤ 4MB), y que haya espacio en el array de reservas.
+El cálculo de la dirección virtual es importante: las reservas se concatenan secuencialmente en el espacio virtual. La primera empieza en 0xA10C0000 (dirección arbitraria del enunciado). La segunda empieza donde terminó la primera. Y así sucesivamente. Esto simplifica el manejo porque cada reserva es un rango continuo sin huecos.
+Cuando encuentra un slot libre, registra la reserva con estado=1 (activa) y retorna la dirección virtual. CRUCIALMENTE, no llama a mmu_map_page. Las páginas NO están mapeadas todavía. Cuando el usuario intente acceder, habrá un page fault, y ahí el handler mapeará.
 
 ```C
 #define MAX_MEMORIA (4*1024*1024) // 4MB
@@ -360,7 +372,10 @@ void* malloco(size_t size){
     return (void*) arr[i].virt;
 }
 ```
-Objetivo de chau: si virt coincide con el inicio de una reserva activa de la tarea, es marcada para liberar (2). Las condiciones de la consigna dicen que no hace falta comprobar punteros malformados (comportamiento indefinido), pero puedes validar con esMemoriaReservada antes.
+La función chau implementa este patrón: simplemente cambia el estado de la reserva de 1 (activa) a 2 (pendiente de liberación). El garbage collector, corriendo periódicamente en nivel 0, recorrerá las reservas con estado=2 y hará la liberación real (desmapear páginas, liberar memoria física).
+
+Validaciones de Seguridad
+Es crítico validar que la dirección pasada sea válida. El enunciado dice que pasar direcciones inválidas produce "comportamiento indefinido", pero en un sistema real querríamos ser más estrictos. Verificamos: que la dirección esté en una reserva (con esMemoriaReservada), que coincida EXACTAMENTE con el inicio de un bloque (no puede liberar desde el medio), y que el estado sea activo (no puede liberar algo ya liberado).
 
 ```C
 void chau(virtaddr_t virt){
